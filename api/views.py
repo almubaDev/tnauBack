@@ -368,112 +368,78 @@ def validar_puede_hacer_tirada(user, tipo_tirada):
 
 def obtener_interpretacion_tirada(tirada, cartas_en_tirada):
     """
-    Genera la interpretación de una tirada de tarot utilizando la API de Anthropic.
-    
-    Args:
-        tirada: Objeto TiradaRealizada con la información de la tirada
-        cartas_en_tirada: Lista de objetos CartaEnTirada
-    
-    Returns:
-        str: Interpretación generada por la IA
+    Genera interpretación usando Anthropic API con manejo de errores mejorado
     """
     try:
-        # Cargar variables de entorno directamente para asegurar que tenemos acceso a la clave API
-        from dotenv import load_dotenv
-        load_dotenv()
+        # Obtener API key directamente de las variables de entorno
+        api_key = os.environ.get('ANTHROPIC_API_KEY')
         
-        # Obtener la clave API de las variables de entorno
-        ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
+        if not api_key:
+            logger.error("API key no encontrada en variables de entorno")
+            return generar_interpretacion_fallback(tirada)
+            
+        # Preparar los datos de las cartas
+        cartas_texto = []
+        for carta in cartas_en_tirada:
+            estado = "invertida" if carta.invertida else "normal"
+            significado = carta.carta.significado_invertido if carta.invertida else carta.carta.significado_normal
+            cartas_texto.append(f"Carta {carta.posicion}: {carta.carta.nombre} ({estado}) - {significado[:150]}...")
         
-        if not ANTHROPIC_API_KEY:
-            logger.error("No se encontró la clave API de Anthropic en variables de entorno")
-            raise ValueError("API key no encontrada")
+        cartas_info = "\n".join(cartas_texto)
         
-        logger.info(f"Usando API key: {ANTHROPIC_API_KEY[:8]}...")
+        # Usar requests directamente para mayor control (más estable que el SDK en algunos entornos)
+        import requests
         
-        # Crear cliente de Anthropic con timeout explícito
-        client = anthropic.Anthropic(
-            api_key=ANTHROPIC_API_KEY,
-            # Configuración explícita del tiempo de espera
-            http_client=anthropic.AnthropicHTTPClient(
-                timeout=60.0,  # Timeout global de 60 segundos
-            )
+        headers = {
+            "x-api-key": api_key,
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01"
+        }
+        
+        data = {
+            "model": "claude-3-5-sonnet-20240620",
+            "max_tokens": 1000,
+            "temperature": 0.7,
+            "system": "Eres un experto tarotista que proporciona interpretaciones místicas pero prácticas.",
+            "messages": [
+                {
+                    "role": "user", 
+                    "content": f"""Interpreta esta tirada de tarot para la pregunta: "{tirada.pregunta}"
+                    
+                    Tipo de tirada: {tirada.tipo_tirada.nombre}
+                    
+                    Cartas:
+                    {cartas_info}
+                    
+                    Da una interpretación completa, esotérica y mística pero práctica, relacionando las cartas entre sí y respondiendo a la pregunta. Usa genere neutral para referirte al consultante ya que no sabemos si es hombre o mujer"""
+                }
+            ]
+        }
+        
+        # Hacer la solicitud con un timeout generoso
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=data,
+            timeout=30  # 30 segundos de timeout
         )
         
-        # Determinar nombres de posiciones según tipo de tirada
-        if tirada.tipo_tirada.tipo == 'basica':
-            nombres_posicion = ["Pasado", "Presente", "Futuro"]
-        elif tirada.tipo_tirada.tipo == 'claridad':
-            nombres_posicion = [
-                "Situación General", 
-                "Obstáculo Principal", "Influencia Consciente", "Influencia Inconsciente",
-                "Consejo", "Resultado Potencial"
-            ]
-        elif tirada.tipo_tirada.tipo == 'profunda':
-            nombres_posicion = [
-                "Esencia del Problema",
-                "Pensamiento Personal", "Pensamiento Externo", "Pensamiento Ideal",
-                "Emociones Personales", "Emociones Externas", "Emociones Ideales",
-                "Situación Material Personal", "Situación Material Externa", "Situación Material Ideal",
-                "Resultado Final"
-            ]
-        else:
-            nombres_posicion = [f"Posición {i+1}" for i in range(tirada.tipo_tirada.num_cartas)]
-        
-        # Asegurar que hay suficientes nombres para todas las posiciones
-        if len(nombres_posicion) < tirada.tipo_tirada.num_cartas:
-            nombres_posicion.extend([f"Posición {i+1}" for i in range(len(nombres_posicion), tirada.tipo_tirada.num_cartas)])
-        
-        # Construir lista de significados de las cartas
-        significados = []
-        for carta_tirada in cartas_en_tirada:
-            posicion_idx = carta_tirada.posicion - 1  # Convertir a índice base 0
-            nombre_posicion = nombres_posicion[posicion_idx] if posicion_idx < len(nombres_posicion) else f"Posición {carta_tirada.posicion}"
-            
-            significado = carta_tirada.carta.significado_invertido if carta_tirada.invertida else carta_tirada.carta.significado_normal
-            orientacion = "invertida" if carta_tirada.invertida else "normal"
-            
-            significados.append(f"Posición {carta_tirada.posicion} ({nombre_posicion}): {carta_tirada.carta.nombre}, {orientacion}. Significado: {significado}")
-        
-        # Crear prompt para la API de Anthropic - más simplificado
-        system_prompt = "Eres un tarotista experto que proporciona interpretaciones místicas pero prácticas."
-
-        user_prompt = f"""Interpreta esta tirada de tarot para la pregunta: "{tirada.pregunta}"
-
-Tipo de tirada: {tirada.tipo_tirada.nombre}
-
-Cartas:
-{chr(10).join(significados)}
-
-Necesito: significado general, conexiones entre cartas, respuesta a mi pregunta, consejos prácticos y mensaje principal."""
-        
-        # Usar un modelo más pequeño y rápido para evitar problemas de timeout
-        logger.info("Enviando solicitud a Anthropic API...")
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",  # Modelo más pequeño/rápido
-            max_tokens=1000,
-            temperature=0.7,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ]
-        )
-        
-        # Extraer la interpretación del objeto de respuesta
-        interpretacion = response.content[0].text
-        
-        # Log de éxito
-        logger.info(f"Interpretación generada exitosamente para tirada ID: {tirada.id}")
-        
-        return interpretacion
+        # Verificar si la respuesta fue exitosa
+        if response.status_code == 200:
+            resultado = response.json()
+            interpretacion = resultado.get("content", [{}])[0].get("text", "")
+            if interpretacion:
+                return interpretacion
+                
+        # Si llegamos aquí, hubo algún problema con la respuesta
+        logger.error(f"Error API Anthropic: {response.status_code} - {response.text}")
+        return generar_interpretacion_fallback(tirada)
         
     except Exception as e:
-        # Log detallado del error
+        # Capturar y registrar cualquier excepción
+        logger.error(f"Error en obtener_interpretacion_tirada: {str(e)}")
         import traceback
-        logger.error(f"Error al generar interpretación: {str(e)}")
         logger.error(traceback.format_exc())
-        
-        # En caso de error, usar interpretación de respaldo
         return generar_interpretacion_fallback(tirada)
 
 def generar_interpretacion_fallback(tirada):
