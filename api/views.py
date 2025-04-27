@@ -28,11 +28,14 @@ from django.core.cache import cache
 # Configurar logging
 logger = logging.getLogger(__name__)
 
-# PayPal configuration
-PAYPAL_CLIENT_ID = settings.PAYPAL_CLIENT_ID
-PAYPAL_CLIENT_SECRET = settings.PAYPAL_CLIENT_SECRET
-PAYPAL_MODE = 'sandbox' if settings.DEBUG else 'live'
-PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com' if settings.DEBUG else 'https://api-m.paypal.com'
+def get_paypal_config():
+    """Get PayPal configuration"""
+    return {
+        'client_id': settings.PAYPAL_CLIENT_ID,
+        'client_secret': settings.PAYPAL_CLIENT_SECRET,
+        'mode': 'sandbox' if settings.DEBUG else 'live',
+        'api_base': 'https://api-m.sandbox.paypal.com' if settings.DEBUG else 'https://api-m.paypal.com'
+    }
 
 def get_paypal_access_token():
     """Get PayPal OAuth access token"""
@@ -40,7 +43,8 @@ def get_paypal_access_token():
     if token:
         return token
 
-    auth = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode()).decode()
+    config = get_paypal_config()
+    auth = base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
         'Content-Type': 'application/x-www-form-urlencoded'
@@ -48,14 +52,13 @@ def get_paypal_access_token():
     data = {'grant_type': 'client_credentials'}
     
     response = requests.post(
-        f'{PAYPAL_API_BASE}/v1/oauth2/token',
+        f'{config["api_base"]}/v1/oauth2/token',
         headers=headers,
         data=data
     )
     
     if response.status_code == 200:
         token = response.json()['access_token']
-        # Cache token for 7 hours (tokens are valid for 8 hours)
         cache.set('paypal_access_token', token, 60 * 60 * 7)
         return token
     

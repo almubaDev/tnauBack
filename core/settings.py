@@ -2,9 +2,20 @@ from pathlib import Path
 from datetime import timedelta
 import os
 from dotenv import load_dotenv
+import logging
+
+# Configurar logging básico
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Log para verificar la carga de variables
+logger.info(f"PAYPAL_CLIENT_ID loaded: {'PAYPAL_CLIENT_ID' in os.environ}")
+logger.info(f"PAYPAL_CLIENT_SECRET loaded: {'PAYPAL_CLIENT_SECRET' in os.environ}")
+logger.info(f"Current directory: {os.getcwd()}")
+logger.info(f"ENV file location: {os.path.join(Path(__file__).resolve().parent.parent, '.env')}")
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -182,6 +193,22 @@ LOGGING = {
         },
     },
 }
+
+# Configuración de PayPal
+PAYPAL_CLIENT_ID = os.getenv('PAYPAL_CLIENT_ID')
+PAYPAL_CLIENT_SECRET = os.getenv('PAYPAL_CLIENT_SECRET')
+PAYPAL_MODE = os.getenv('PAYPAL_MODE')
+PAYPAL_API_BASE = os.getenv('PAYPAL_API_BASE')
+PAYPAL_PRODUCT_ID = os.getenv('PAYPAL_PRODUCT_ID')
+PAYPAL_SUBSCRIPTION_PLAN_ID = os.getenv('PAYPAL_SUBSCRIPTION_PLAN_ID')
+PAYPAL_RETURN_URL = os.getenv('PAYPAL_RETURN_URL')
+PAYPAL_CANCEL_URL = os.getenv('PAYPAL_CANCEL_URL')
+PAYPAL_SUBSCRIPTION_RETURN_URL = os.getenv('PAYPAL_SUBSCRIPTION_RETURN_URL')
+PAYPAL_SUBSCRIPTION_CANCEL_URL = os.getenv('PAYPAL_SUBSCRIPTION_CANCEL_URL')
+
+
+
+
 
 # Stripe Settings
 STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
