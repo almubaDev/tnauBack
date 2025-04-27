@@ -3,13 +3,15 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from .models import (UserProfile, Hechizo, Pocion, CompraHechizo, CompraPocion,
-                     CartaTarot, TipoTirada, TiradaRealizada, CartaEnTirada)
+                     CartaTarot, TipoTirada, TiradaRealizada, CartaEnTirada,
+                     PayPalPayment, PayPalSubscription)
 from .subscription_handler import reset_subscription_benefits
 from .serializers import (
     UserProfileSerializer, HechizoSerializer, PocionSerializer,
     UserSerializer, CompraHechizoSerializer, CompraPocionSerializer,
     CartaTarotSerializer, TipoTiradaSerializer, TiradaRealizadaSerializer, 
-    CartaEnTiradaSerializer, CrearTiradaSerializer
+    CartaEnTiradaSerializer, CrearTiradaSerializer, PayPalPaymentSerializer,
+    PayPalSubscriptionSerializer
 )
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .custom_token import CustomTokenObtainPairSerializer
@@ -18,12 +20,46 @@ import os
 import anthropic
 import logging
 from django.conf import settings
+import requests
+import base64
+import json
+from django.core.cache import cache
 
 # Configurar logging
 logger = logging.getLogger(__name__)
 
+# PayPal configuration
+PAYPAL_CLIENT_ID = settings.PAYPAL_CLIENT_ID
+PAYPAL_CLIENT_SECRET = settings.PAYPAL_CLIENT_SECRET
+PAYPAL_MODE = 'sandbox' if settings.DEBUG else 'live'
+PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com' if settings.DEBUG else 'https://api-m.paypal.com'
 
+def get_paypal_access_token():
+    """Get PayPal OAuth access token"""
+    token = cache.get('paypal_access_token')
+    if token:
+        return token
 
+    auth = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}".encode()).decode()
+    headers = {
+        'Authorization': f'Basic {auth}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    data = {'grant_type': 'client_credentials'}
+    
+    response = requests.post(
+        f'{PAYPAL_API_BASE}/v1/oauth2/token',
+        headers=headers,
+        data=data
+    )
+    
+    if response.status_code == 200:
+        token = response.json()['access_token']
+        # Cache token for 7 hours (tokens are valid for 8 hours)
+        cache.set('paypal_access_token', token, 60 * 60 * 7)
+        return token
+    
+    raise Exception('Failed to get PayPal access token')
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
@@ -547,3 +583,280 @@ def realizar_tirada(request):
         "costo_gemas": costo,
         "tirada": serializer.data
     })
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_paypal_payment(request):
+    try:
+        amount = request.data.get('amount')
+        gems_amount = request.data.get('gems_amount')
+        
+        if not amount or not gems_amount:
+            return Response({
+                'error': 'Amount and gems_amount are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create PayPal order
+        access_token = get_paypal_access_token()
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        order_data = {
+            'intent': 'CAPTURE',
+            'purchase_units': [{
+                'amount': {
+                    'currency_code': 'USD',
+                    'value': str(amount)
+                },
+                'description': f'Purchase {gems_amount} gems in TarotNautica'
+            }],
+            'application_context': {
+                'return_url': settings.PAYPAL_RETURN_URL,
+                'cancel_url': settings.PAYPAL_CANCEL_URL
+            }
+        }
+        
+        response = requests.post(
+            f'{PAYPAL_API_BASE}/v2/checkout/orders',
+            headers=headers,
+            json=order_data
+        )
+        
+        if response.status_code != 201:
+            return Response({
+                'error': 'Failed to create PayPal order'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        order_response = response.json()
+        
+        # Create local payment record
+        payment = PayPalPayment.objects.create(
+            user=request.user,
+            amount=amount,
+            currency='USD',
+            status='PENDING',
+            payment_type='GEMS',
+            gems_amount=gems_amount,
+            order_id=order_response['id']
+        )
+        
+        serializer = PayPalPaymentSerializer(payment)
+        return Response({
+            **serializer.data,
+            'order_id': order_response['id'],
+            'links': order_response['links']
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        logger.error(f'Error creating PayPal payment: {str(e)}')
+        return Response({
+            'error': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def paypal_payment_webhook(request):
+    try:
+        # Verify webhook signature
+        webhook_id = settings.PAYPAL_WEBHOOK_ID
+        headers = {
+            'Authorization': f'Bearer {get_paypal_access_token()}',
+            'Content-Type': 'application/json'
+        }
+        
+        verification_data = {
+            'auth_algo': request.headers.get('PAYPAL-AUTH-ALGO'),
+            'cert_url': request.headers.get('PAYPAL-CERT-URL'),
+            'transmission_id': request.headers.get('PAYPAL-TRANSMISSION-ID'),
+            'transmission_sig': request.headers.get('PAYPAL-TRANSMISSION-SIG'),
+            'transmission_time': request.headers.get('PAYPAL-TRANSMISSION-TIME'),
+            'webhook_id': webhook_id,
+            'webhook_event': request.data
+        }
+        
+        verify_response = requests.post(
+            f'{PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature',
+            headers=headers,
+            json=verification_data
+        )
+        
+        if verify_response.status_code != 200 or verify_response.json()['verification_status'] != 'SUCCESS':
+            return Response({
+                'error': 'Invalid webhook signature'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Process webhook
+        event_type = request.data.get('event_type')
+        resource = request.data.get('resource', {})
+        order_id = resource.get('id')
+        
+        if not order_id:
+            return Response({
+                'error': 'Order ID not found in webhook'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        payment = PayPalPayment.objects.get(order_id=order_id)
+        
+        if event_type == 'CHECKOUT.ORDER.APPROVED':
+            payment.status = 'COMPLETED'
+            payment.save()
+            
+            # Add gems to user's account
+            user_profile = UserProfile.objects.get(user=payment.user)
+            user_profile.gemas += payment.gems_amount
+            user_profile.save()
+            
+            logger.info(f'Added {payment.gems_amount} gems to user {payment.user.id}')
+        
+        serializer = PayPalPaymentSerializer(payment)
+        return Response(serializer.data)
+        
+    except PayPalPayment.DoesNotExist:
+        return Response({
+            'error': 'Payment not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f'Error processing PayPal webhook: {str(e)}')
+        return Response({
+            'error': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_paypal_subscription(request):
+    try:
+        # Create PayPal subscription
+        access_token = get_paypal_access_token()
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+        }
+        
+        subscription_data = {
+            'plan_id': settings.PAYPAL_PLAN_ID,
+            'application_context': {
+                'return_url': settings.PAYPAL_SUBSCRIPTION_RETURN_URL,
+                'cancel_url': settings.PAYPAL_SUBSCRIPTION_CANCEL_URL,
+                'user_action': 'SUBSCRIBE_NOW'
+            }
+        }
+        
+        response = requests.post(
+            f'{PAYPAL_API_BASE}/v1/billing/subscriptions',
+            headers=headers,
+            json=subscription_data
+        )
+        
+        if response.status_code != 201:
+            return Response({
+                'error': 'Failed to create PayPal subscription'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        subscription_response = response.json()
+        
+        # Create local subscription record
+        subscription = PayPalSubscription.objects.create(
+            user=request.user,
+            subscription_id=subscription_response['id'],
+            status='PENDING'
+        )
+        
+        serializer = PayPalSubscriptionSerializer(subscription)
+        return Response({
+            **serializer.data,
+            'links': subscription_response['links']
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        logger.error(f'Error creating PayPal subscription: {str(e)}')
+        return Response({
+            'error': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def paypal_subscription_webhook(request):
+    try:
+        # Verify webhook signature
+        webhook_id = settings.PAYPAL_WEBHOOK_ID
+        headers = {
+            'Authorization': f'Bearer {get_paypal_access_token()}',
+            'Content-Type': 'application/json'
+        }
+        
+        verification_data = {
+            'auth_algo': request.headers.get('PAYPAL-AUTH-ALGO'),
+            'cert_url': request.headers.get('PAYPAL-CERT-URL'),
+            'transmission_id': request.headers.get('PAYPAL-TRANSMISSION-ID'),
+            'transmission_sig': request.headers.get('PAYPAL-TRANSMISSION-SIG'),
+            'transmission_time': request.headers.get('PAYPAL-TRANSMISSION-TIME'),
+            'webhook_id': webhook_id,
+            'webhook_event': request.data
+        }
+        
+        verify_response = requests.post(
+            f'{PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature',
+            headers=headers,
+            json=verification_data
+        )
+        
+        if verify_response.status_code != 200 or verify_response.json()['verification_status'] != 'SUCCESS':
+            return Response({
+                'error': 'Invalid webhook signature'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Process webhook
+        event_type = request.data.get('event_type')
+        resource = request.data.get('resource', {})
+        subscription_id = resource.get('id')
+        
+        if not subscription_id:
+            return Response({
+                'error': 'Subscription ID not found in webhook'
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        subscription = PayPalSubscription.objects.get(subscription_id=subscription_id)
+        
+        if event_type == 'BILLING.SUBSCRIPTION.ACTIVATED':
+            subscription.status = 'ACTIVE'
+            subscription.save()
+            
+            # Update user's premium status
+            user_profile = UserProfile.objects.get(user=subscription.user)
+            was_subscribed = user_profile.tiene_suscripcion
+            user_profile.tiene_suscripcion = True
+            
+            # Reset tiradas and add bonus gemas when subscribing
+            if not was_subscribed:
+                user_profile = reset_subscription_benefits(user_profile)
+            else:
+                user_profile.save()
+                
+            logger.info(f'Activated premium subscription for user {subscription.user.id}')
+            
+        elif event_type == 'BILLING.SUBSCRIPTION.CANCELLED':
+            subscription.status = 'CANCELLED'
+            subscription.save()
+            
+            # Update user's premium status
+            user_profile = UserProfile.objects.get(user=subscription.user)
+            user_profile.tiene_suscripcion = False
+            user_profile.save()
+            
+            logger.info(f'Cancelled premium subscription for user {subscription.user.id}')
+        
+        serializer = PayPalSubscriptionSerializer(subscription)
+        return Response(serializer.data)
+        
+    except PayPalSubscription.DoesNotExist:
+        return Response({
+            'error': 'Subscription not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f'Error processing PayPal subscription webhook: {str(e)}')
+        return Response({
+            'error': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)

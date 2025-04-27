@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     UserProfile, Hechizo, Pocion, CompraHechizo, CompraPocion, CustomUser,
-    CartaTarot, TipoTirada, TiradaRealizada, CartaEnTirada
+    CartaTarot, TipoTirada, TiradaRealizada, CartaEnTirada, PayPalPayment, PayPalSubscription
 )
 from django.contrib.auth.password_validation import validate_password
 from rest_framework.validators import UniqueValidator
@@ -102,3 +102,16 @@ class TiradaRealizadaSerializer(serializers.ModelSerializer):
 class CrearTiradaSerializer(serializers.Serializer):
     tipo_tirada = serializers.PrimaryKeyRelatedField(queryset=TipoTirada.objects.all())
     pregunta = serializers.CharField(required=True)
+
+class PayPalPaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PayPalPayment
+        fields = ['id', 'user', 'order_id', 'amount', 'currency', 'status', 
+                 'payment_type', 'gems_amount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+class PayPalSubscriptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PayPalSubscription
+        fields = ['id', 'user', 'subscription_id', 'status', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']

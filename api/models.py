@@ -168,3 +168,82 @@ class CartaEnTirada(models.Model):
     def __str__(self):
         estado = "Invertida" if self.invertida else "Normal"
         return f"{self.carta.nombre} - Posición {self.posicion} - {estado}"
+
+# Nuevos modelos para Stripe
+class StripeCustomer(models.Model):
+    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
+    stripe_customer_id = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.stripe_customer_id}"
+
+class StripeSubscription(models.Model):
+    STATUS_CHOICES = [
+        ('active', 'Activa'),
+        ('past_due', 'Pago Pendiente'),
+        ('canceled', 'Cancelada'),
+        ('incomplete', 'Incompleta'),
+        ('incomplete_expired', 'Expirada'),
+        ('trialing', 'En Periodo de Prueba'),
+        ('unpaid', 'No Pagada')
+    ]
+
+    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
+    stripe_subscription_id = models.CharField(max_length=100)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    current_period_end = models.DateTimeField()
+    cancel_at_period_end = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.status}"
+
+class StripePayment(models.Model):
+    STATUS_CHOICES = [
+        ('pending', 'Pendiente'),
+        ('completed', 'Completado'),
+        ('failed', 'Fallido'),
+        ('refunded', 'Reembolsado')
+    ]
+
+    PAYMENT_TYPE_CHOICES = [
+        ('subscription', 'Suscripción'),
+        ('gems', 'Compra de Gemas')
+    ]
+
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    stripe_payment_intent_id = models.CharField(max_length=100)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=3, default='USD')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES)
+    gems_amount = models.IntegerField(null=True, blank=True)  # Solo para compras de gemas
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.payment_type} - {self.amount} {self.currency}"
+
+class PayPalPayment(models.Model):
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    order_id = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    gems_amount = models.IntegerField()
+    status = models.CharField(max_length=20, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"PayPal Payment {self.order_id} - {self.status}"
+
+class PayPalSubscription(models.Model):
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    subscription_id = models.CharField(max_length=100, unique=True)
+    status = models.CharField(max_length=20, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"PayPal Subscription {self.subscription_id} - {self.status}"

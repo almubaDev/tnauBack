@@ -30,12 +30,14 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework_simplejwt',
+    'corsheaders',
     'api',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # Debe ir antes de CommonMiddleware
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -180,3 +182,31 @@ LOGGING = {
         },
     },
 }
+
+# Stripe Settings
+STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
+STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
+STRIPE_SUBSCRIPTION_PRICE_ID = os.getenv('STRIPE_SUBSCRIPTION_PRICE_ID')
+
+# Validar configuración de Stripe en producción
+if not all([STRIPE_PUBLISHABLE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_SUBSCRIPTION_PRICE_ID]) and not DEBUG:
+    import warnings
+    warnings.warn(
+        "Las claves de Stripe no están configuradas correctamente. "
+        "Los pagos no funcionarán hasta que configures todas las variables de Stripe en el archivo .env"
+    )
+
+# Asegurarse de que el webhook de Stripe esté exento de CSRF
+CSRF_EXEMPT_URLS = [
+    'api/stripe-webhook/'
+]
+
+# CORS settings
+CORS_ALLOW_ALL_ORIGINS = True  # Solo para desarrollo
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:19000",  # Expo default port
+    "http://localhost:19006",  # Expo web
+    "exp://192.168.0.5:19000",  # Expo en tu IP
+]
